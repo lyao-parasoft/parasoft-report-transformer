@@ -34,10 +34,14 @@ jobs:
     # build the project.
     - name: build the batch file
       run: ./gradlew clean build
+         
+     # unzip the parasoft-report-transformer-1.0.0.zip.
+    - name: unzip the parasoft-report-transformer-1.0.0.zip
+      run: unzip build/distributions/parasoft-report-transformer-1.0.0.zip
     
     # Generates the jtest.data.json input file.
     - name: Create input for Jtest
-      run: ./gradlew clean build jtest -I /path/to/jtest/integration/gradle/init.gradle "-Djtest.skip=true"
+      run: ./gradlew clean build jtest -I D:\parasoft-tools\All\2024.2.0\jtest\integration\gradle\init.gradle "-Djtest.skip=true"
 
     # Runs code analysis with Jtest.
     - name: Run Jtest
@@ -46,10 +50,10 @@ jobs:
       with:
         #Uses the jtest.data.json generated with the Gradle command in the previous step
         input: build/jtest/jtest.data.json
-     
+        
     # converte the xml2sarif.
     - name: converte the xml2sarif
-      run: build/distributions\XMLToSARIF.bat -i reports\report.xml -o reports\report.sarif
+      run: build\distributions\parasoft-report-transformer-1.0.0\bin\XMLToSARIF.bat -i reports\report.xml -o reports\report.sarif
     
     # Uploads analysis results in the SARIF format, so that they are displayed as GitHub code scanning alerts.
     - name: Upload results (SARIF)

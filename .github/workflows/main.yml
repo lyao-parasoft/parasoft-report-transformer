@@ -50,16 +50,17 @@ jobs:
       with:
         #Uses the jtest.data.json generated with the Gradle command in the previous step
         installDir: D:/parasoft-tools/All/2024.2.0/jtest
+        testConfig: 'jtest_settings.properties'
         input: build/jtest/jtest.data.json
         
     # converte the xml2sarif.
     - name: converte the xml2sarif
-      run: build\distributions\parasoft-report-transformer-1.0.0\bin\XMLToSARIF.bat -i reports\report.xml -o reports\report.sarif
+      run: build/distributions/parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat -i reports\report.xml -o reports\report.sarif
     
     # Uploads analysis results in the SARIF format, so that they are displayed as GitHub code scanning alerts.
     - name: Upload results (SARIF)
       if: always()
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@v2
       with:
         sarif_file: reports/report.sarif # reports is a default location for reports directory
 

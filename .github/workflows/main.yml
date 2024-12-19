@@ -38,7 +38,7 @@ jobs:
      # unzip the parasoft-report-transformer-1.0.0.zip.
     - name: unzip the parasoft-report-transformer-1.0.0.zip
       run: unzip build/distributions/parasoft-report-transformer-1.0.0.zip
-    
+
     # Generates the jtest.data.json input file.
     - name: Create input for Jtest
       run: ./gradlew clean build jtest -I D:\parasoft-tools\All\2024.2.0\jtest\integration\gradle\init.gradle "-Djtest.skip=true"

@@ -39,6 +39,13 @@ jobs:
     - name: unzip the parasoft-report-transformer-1.0.0.zip
       run: unzip build/distributions/parasoft-report-transformer-1.0.0.zip
 
+    # check CRLF
+    - name: Check and convert line endings
+      run: |
+          file parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
+          sed -i 's/$/\r/' parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
+          file parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
+
     # Generates the jtest.data.json input file.
     - name: Create input for Jtest
       run: ./gradlew clean build jtest -I D:\parasoft-tools\All\2024.2.0\jtest\integration\gradle\init.gradle "-Djtest.skip=true"
@@ -55,7 +62,7 @@ jobs:
         
     # converte the xml2sarif.
     - name: converte the xml2sarif
-      run: parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat -i reports\report.xml -o reports\report-new.sarif
+      run: parasoft-report-transformer-1.0.0\bin\XMLToSARIF.bat -i reports\report.xml -o reports\report-new.sarif
     
     # Uploads analysis results in the SARIF format, so that they are displayed as GitHub code scanning alerts.
     - name: Upload results (SARIF)

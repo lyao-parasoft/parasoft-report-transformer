@@ -49,7 +49,7 @@ jobs:
       uses: parasoft/run-jtest-action@2.0.0
       with:
         #Uses the jtest.data.json generated with the Gradle command in the previous step
-        installDir: 'D:\parasoft-tools\All\2024.2.0\jtest'
+        installDir: D:/parasoft-tools/All/2024.2.0/jtest
         input: build/jtest/jtest.data.json
         
     # converte the xml2sarif.

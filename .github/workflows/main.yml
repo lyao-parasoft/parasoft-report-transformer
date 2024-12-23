@@ -22,7 +22,7 @@ jobs:
       security-events: write
       
     # Specifies the type of runner that the job will run on.
-    runs-on: self-hosted
+    runs-on: [self-hosted，Windows]
 
     # Steps represent a sequence of tasks that will be executed as part of the job.
     steps:
@@ -40,11 +40,11 @@ jobs:
       run: unzip build/distributions/parasoft-report-transformer-1.0.0.zip
 
     # check CRLF
-    - name: Check and convert line endings
-      run: |
-          file parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
-          sed -i 's/$/\r/' parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
-          file parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
+   # - name: Check and convert line endings
+   #   run: |
+     #     file parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
+     #     sed -i 's/$/\r/' parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
+       #   file parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
 
     # Generates the jtest.data.json input file.
     - name: Create input for Jtest

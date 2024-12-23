@@ -30,6 +30,41 @@ jobs:
     # Checks out your repository under $GITHUB_WORKSPACE, so that your job can access it.
     - name: Checkout repository
       uses: actions/checkout@v3
+
+    # change  pction
+
+on:
+  # Trigger the workflow on push or pull request events but only for the main branch.
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+  # Allows you to run this workflow manually from the Actions tab.
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel.
+jobs:
+  build-on-linux:
+    name: Analyze project with Jtest
+    
+    permissions:
+      # required for all workflows
+      security-events: write
+      
+    # Specifies the type of runner that the job will run on.
+    runs-on: [self-hosted, luffy-linux]
+
+    # Steps represent a sequence of tasks that will be executed as part of the job.
+    steps:
+    
+    # Checks out your repository under $GITHUB_WORKSPACE, so that your job can access it.
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    # change authority of the build script.
+    - name: build the sh file
+      run: chmod -R 777 /home/devtest/github-runner/_work/parasoft-report-transformer
       
     # build the project.
     - name: build the batch file

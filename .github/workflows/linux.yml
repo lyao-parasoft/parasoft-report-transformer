@@ -65,7 +65,7 @@ jobs:
         
     # converte the xml2sarif.
     - name: converte the xml2sarif
-      run: parasoft-report-transformer-1.0.0\bin\XMLToSARIF.sh -i reports\report.xml -o reports\report-new.sarif
+      run: parasoft-report-transformer-1.0.0/bin/XMLToSARIF.sh -i reports/report.xml -o reports/report-new.sarif
     
     # Uploads analysis results in the SARIF format, so that they are displayed as GitHub code scanning alerts.
     - name: Upload results (SARIF)

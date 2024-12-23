@@ -14,7 +14,7 @@ on:
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel.
 jobs:
-  build:
+  build-on-windows:
     name: Analyze project with Jtest
     
     permissions:
@@ -22,7 +22,7 @@ jobs:
       security-events: write
       
     # Specifies the type of runner that the job will run on.
-    runs-on: [self-hosted，Windows]
+    runs-on: [self-hosted, luffy-test]
 
     # Steps represent a sequence of tasks that will be executed as part of the job.
     steps:

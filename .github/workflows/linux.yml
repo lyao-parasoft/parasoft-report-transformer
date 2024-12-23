@@ -53,7 +53,7 @@ jobs:
 
     # Generates the jtest.data.json input file.
     - name: Create input for Jtest
-      run: ./gradlew clean build jtest -I /home/devtest/parasoft-tools/2024.2.0/jtest/integration/gradle/init.gradle "-Djtest.skip=true" -x test
+      run: ./gradlew clean build jtest -I /home/devtest/parasoft-tools/2024.2.0/jtest/integration/gradle/init.gradle "-Djtest.skip=true"
 
     # Runs code analysis with Jtest.
     - name: Run Jtest

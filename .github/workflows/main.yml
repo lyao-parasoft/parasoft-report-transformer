@@ -29,6 +29,8 @@ jobs:
     # Checks out your repository under $GITHUB_WORKSPACE, so that your job can access it.
     - name: Checkout repository
       uses: actions/checkout@v3
+      with:
+        ref: fix-crlf-issue
       
     # build the project.
     - name: build the batch file

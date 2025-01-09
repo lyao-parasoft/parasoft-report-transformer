@@ -37,19 +37,19 @@ jobs:
       run: chmod -R 777 /home/devtest/github-runner/_work/parasoft-report-transformer
       
     # build the project.
-    - name: build the batch file
-      run: ./gradlew clean build
+    #- name: build the batch file
+    #  run: ./gradlew clean build
          
      # unzip the parasoft-report-transformer-1.0.0.zip.
     - name: unzip the parasoft-report-transformer-1.0.0.zip
-      run: unzip build/distributions/parasoft-report-transformer-1.0.0.zip
+      run: tar -zxvf build/distributions/parasoft-report-transformer-1.0.1.tar
 
     # check CRLF
     #- name: Check and convert line endings
     #  run: |
     #      file parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
     #      sed -i 's/$/\r/' parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
-    #      file parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
+    #      file parasoft-report-transformer-1.0.1/bin/XMLToSARIF.bat
 
     # Generates the jtest.data.json input file.
     - name: Create input for Jtest

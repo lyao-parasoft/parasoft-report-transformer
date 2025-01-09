@@ -33,12 +33,12 @@ jobs:
    #     ref: fix-crlf-issue
       
     # build the project.
-    - name: build the batch file
-      run: ./gradlew clean build
+    #- name: build the batch file
+     # run: ./gradlew clean build
          
      # unzip the parasoft-report-transformer-1.0.0.zip.
     - name: unzip the parasoft-report-transformer-1.0.0.zip
-      run: unzip build/distributions/parasoft-report-transformer-1.0.0.zip
+      run: unzip parasoft-report-transformer-1.0.1.zip
 
     # check CRLF
    # - name: Check and convert line endings

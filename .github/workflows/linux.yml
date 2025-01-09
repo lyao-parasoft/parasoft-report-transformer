@@ -42,7 +42,7 @@ jobs:
          
      # unzip the parasoft-report-transformer-1.0.0.zip.
     - name: unzip the parasoft-report-transformer-1.0.0.zip
-      run: tar -zxvf build/distributions/parasoft-report-transformer-1.0.1.tar
+      run: tar -zxvf parasoft-report-transformer-1.0.1.tar
 
     # check CRLF
     #- name: Check and convert line endings

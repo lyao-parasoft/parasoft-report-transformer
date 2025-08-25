@@ -7,4 +7,12 @@
       </reference>
     </externalReferences>
   </component>
+  <component>
+    <virtualPath>.*jackson\-databind\-2\.19\.2\.jar</virtualPath>
+    <externalReferences>
+      <reference type="other">
+        <url>https://central.sonatype.com/artifact/com.fasterxml.jackson.core/jackson-databind/2.19.2</url>
+      </reference>
+    </externalReferences>
+  </component>
 </components>

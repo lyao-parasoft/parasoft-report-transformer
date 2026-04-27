@@ -33,12 +33,12 @@ jobs:
    #     ref: fix-crlf-issue
       
     # build the project.
-    #- name: build the batch file
-     # run: ./gradlew clean build
+    - name: build the batch file
+      run: ./gradlew clean build
          
      # unzip the parasoft-report-transformer-1.0.0.zip.
-    - name: unzip the parasoft-report-transformer-1.0.0.zip
-      run: unzip parasoft-report-transformer-1.0.1.zip
+    - name: unzip the parasoft-report-transformer.zip
+      run: unzip parasoft-report-transformer-1.0.2.zip
 
     # check CRLF
    # - name: Check and convert line endings
@@ -49,7 +49,7 @@ jobs:
 
     # Generates the jtest.data.json input file.
     - name: Create input for Jtest
-      run: ./gradlew clean build jtest -I D:\parasoft-tools\All\2024.2.0\jtest\integration\gradle\init.gradle "-Djtest.skip=true"
+      run: ./gradlew clean build jtest -I D:\parasoft-tools\All\2025.2.0\jtest\integration\gradle\init.gradle "-Djtest.skip=true"
 
     # Runs code analysis with Jtest.
     - name: Run Jtest

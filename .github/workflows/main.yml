@@ -1,81 +1,107 @@
-
-# This is a basic workflow to help you get started with the Run Jtest action.
+# This is a workflow to analyze the project with Jtest.
 name: Windows action
-on:
-  # Trigger the workflow on push or pull request events but only for the main branch.
-  push:
-    branches: [ renee_cicd1180 ]
-  pull_request:
-    branches: [ renee_cicd1180 ]
 
-  # Allows you to run this workflow manually from the Actions tab.
+on:
+  push:
+    branches: [renee_cicd1180]
+
+  pull_request:
+    branches: [renee_cicd1180]
+
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel.
 jobs:
   build-on-windows:
     name: Analyze project with Jtest
-    
+
     permissions:
-      # required for all workflows
+      contents: read
       security-events: write
-      
-    # Specifies the type of runner that the job will run on.
+
     runs-on: [self-hosted, luffy-test]
 
-    # Steps represent a sequence of tasks that will be executed as part of the job.
     steps:
-    
-    # Checks out your repository under $GITHUB_WORKSPACE, so that your job can access it.
-    - name: Checkout repository
-      uses: actions/checkout@v3
- #     with:
-   #     ref: fix-crlf-issue
-      
-    # build the project.
-    - name: build the batch file
-      run: ./gradlew clean build
-         
-     # unzip the parasoft-report-transformer-1.0.0.zip.
-    - name: unzip the parasoft-report-transformer.zip
-      run: unzip parasoft-report-transformer-1.0.2.zip
 
-    # check CRLF
-   # - name: Check and convert line endings
-   #   run: |
-     #     file parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
-     #     sed -i 's/$/\r/' parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
-       #   file parasoft-report-transformer-1.0.0/bin/XMLToSARIF.bat
+      # Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    # Generates the jtest.data.json input file.
-    - name: Create input for Jtest
-      run: ./gradlew clean build jtest -I D:\parasoft-tools\All\2025.2.0\jtest\integration\gradle\init.gradle "-Djtest.skip=true"
+      # Build the project
+      - name: Build the project
+        shell: bash
+        run: ./gradlew clean build
 
-    # Runs code analysis with Jtest.
-    - name: Run Jtest
-      id: jtest
-      uses: parasoft/run-jtest-action@2.0.0
-      with:
-        #Uses the jtest.data.json generated with the Gradle command in the previous step
-        installDir: D:/parasoft-tools/All/2025.2.0/jtest
-        testConfig: 'dtp://luffy'
-        input: build/jtest/jtest.data.json
-        
-    # converte the xml2sarif.
-    - name: converte the xml2sarif
-      run: parasoft-report-transformer-1.0.1\bin\XMLToSARIF.bat -i reports\report.xml -o reports\report-new.sarif
-    
-    # Uploads analysis results in the SARIF format, so that they are displayed as GitHub code scanning alerts.
-    - name: Upload results (SARIF)
-      if: always()
-      uses: github/codeql-action/upload-sarif@v3
-      with:
-        sarif_file: reports/report-new.sarif # reports is a default location for reports directory
+      # Unzip Report Transformer
+      - name: Unzip the parasoft-report-transformer
+        shell: powershell
+        run: |
+          $zip = Join-Path $env:GITHUB_WORKSPACE "build\distributions\parasoft-report-transformer-1.0.2.zip"
 
-    # Uploads an archive that includes all report files (.xml, .html, .sarif).
-    - name: Archive reports
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: Static analysis reports
-        path: reports/*.*
+          if (-not (Test-Path $zip)) {
+            throw "ZIP file not found: $zip"
+          }
+
+          Expand-Archive -Path $zip -DestinationPath $env:GITHUB_WORKSPACE -Force
+
+      # Generate Jtest input
+      - name: Create input for Jtest
+        shell: bash
+        run: |
+          ./gradlew clean build jtest \
+            -I "D:/parasoft-tools/All/2025.2.0/jtest/integration/gradle/init.gradle" \
+            "-Djtest.skip=true"
+
+      # Run Jtest analysis
+      - name: Run Jtest
+        id: jtest
+        uses: parasoft/run-jtest-action@2.0.0
+        with:
+          installDir: D:/parasoft-tools/All/2025.2.0/jtest
+          testConfig: 'dtp://luffy'
+          input: build/jtest/jtest.data.json
+
+      # Convert XML report to SARIF
+      - name: Convert XML to SARIF
+        shell: powershell
+        run: |
+          $converter = Join-Path $env:GITHUB_WORKSPACE "parasoft-report-transformer-1.0.2\bin\XMLToSARIF.bat"
+          $inputFile = Join-Path $env:GITHUB_WORKSPACE "reports\report.xml"
+          $outputFile = Join-Path $env:GITHUB_WORKSPACE "reports\report-new.sarif"
+
+          if (-not (Test-Path $converter)) {
+            throw "Converter not found: $converter"
+          }
+
+          if (-not (Test-Path $inputFile)) {
+            throw "Input XML not found: $inputFile"
+          }
+
+          New-Item -ItemType Directory -Path (Split-Path $outputFile) -Force | Out-Null
+
+          & $converter -i $inputFile -o $outputFile
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "XML to SARIF conversion failed with exit code $LASTEXITCODE"
+          }
+
+          if (-not (Test-Path $outputFile)) {
+            throw "SARIF file was not generated: $outputFile"
+          }
+
+          Write-Host "SARIF file generated successfully: $outputFile"
+
+      # Upload SARIF results to GitHub Code Scanning
+      - name: Upload results (SARIF)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: reports/report-new.sarif
+
+      # Archive reports
+      - name: Archive reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Static analysis reports
+          path: reports/*.*
+          if-no-files-found: warn

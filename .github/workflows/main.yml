@@ -44,12 +44,9 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $env:GITHUB_WORKSPACE -Force
 
       # Generate Jtest input
+# Generates the jtest.data.json input file.
       - name: Create input for Jtest
-        shell: bash
-        run: |
-          ./gradlew clean build jtest \
-            -I "D:/parasoft-tools/All/2025.2.0/jtest/integration/gradle/init.gradle" \
-            "-Djtest.skip=true"
+        run: ./gradlew clean build jtest -I D:\parasoft-tools\All\2025.2.0\jtest\integration\gradle\init.gradle "-Djtest.skip=true"
 
       # Run Jtest analysis
       - name: Run Jtest

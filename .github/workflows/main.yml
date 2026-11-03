@@ -53,7 +53,7 @@ jobs:
         id: jtest
         uses: parasoft/run-jtest-action@2.0.0
         with:
-          installDir: D:/parasoft-tools/All/2025.2.0/jtest
+          installDir: D:/parasoft-tools/All/2026.1.0/jtest
           testConfig: 'dtp://luffy'
           input: build/jtest/jtest.data.json
 

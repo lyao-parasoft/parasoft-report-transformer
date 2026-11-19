@@ -27,7 +27,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'CICD-1190' }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'workflow_dispatch' && github.ref || github.sha) }}
 
       # Verify source commit
       - name: Verify source commit
@@ -41,6 +41,7 @@ jobs:
           $message = git log -1 --pretty=%s
 
           Write-Host "Event: $env:GITHUB_EVENT_NAME"
+          Write-Host "Repository: $env:GITHUB_REPOSITORY"
           Write-Host "Commit: $commit"
           Write-Host "Commit Message: $message"
 
@@ -48,7 +49,7 @@ jobs:
             $expectedCommit = "${{ github.event.pull_request.head.sha }}"
           }
           elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
-            $expectedCommit = $commit
+            $expectedCommit = "${{ github.sha }}"
           }
           else {
             $expectedCommit = "${{ github.sha }}"
@@ -114,7 +115,7 @@ jobs:
       # Generates the jtest.data.json input file.
       - name: Create input for Jtest
         shell: bash
-        run: ./gradlew clean build jtest -I D:\parasoft-tools\All\2026.1.0\jtest\integration\gradle\init.gradle "-Djtest.skip=true"
+        run: ./gradlew clean build jtest -I "D:/parasoft-tools/All/2026.1.0/jtest/integration/gradle/init.gradle" "-Djtest.skip=true"
 
       # Run Jtest analysis
       - name: Run Jtest

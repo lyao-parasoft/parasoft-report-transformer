@@ -1,0 +1,148 @@
+
+# This is a workflow to analyze the project with Jtest.
+name: Windows action
+
+on:
+  push:
+    branches: [CICD-1190]
+
+  pull_request:
+    branches: [CICD-1190]
+
+  workflow_dispatch:
+
+jobs:
+  build-on-windows:
+    name: Analyze project with Jtest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    runs-on: [self-hosted, luffy-test]
+
+    steps:
+
+      # Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'CICD-1190' }}
+
+      # Verify source branch and commit
+      - name: Verify source branch and commit
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "Transformer Source Information"
+          echo "========================================"
+
+          echo "Event: ${{ github.event_name }}"
+          echo "Branch: $(git branch --show-current)"
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "Commit Message: $(git log -1 --pretty=%s)"
+
+          echo "========================================"
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            if [ "$(git rev-parse HEAD)" != "${{ github.sha }}" ]; then
+              echo "ERROR: Checked out commit does not match triggering commit!"
+              exit 1
+            fi
+          else
+            if [ "$(git rev-parse HEAD)" != "${{ github.event.pull_request.head.sha }}" ]; then
+              echo "ERROR: Checked out commit does not match PR source commit!"
+              exit 1
+            fi
+          fi
+
+      # Build the project
+      - name: Build the project
+        shell: bash
+        run: ./gradlew clean build
+
+      # Verify build artifact
+      - name: Verify build artifact
+        shell: powershell
+        run: |
+          $zip = Join-Path $env:GITHUB_WORKSPACE "build\distributions\parasoft-report-transformer-1.0.2.zip"
+
+          if (-not (Test-Path $zip)) {
+            throw "Build artifact not found: $zip"
+          }
+
+          Write-Host "Build artifact generated successfully:"
+          Get-Item $zip | Format-List FullName, Length, LastWriteTime
+
+      # Unzip Report Transformer
+      - name: Unzip the parasoft-report-transformer
+        shell: powershell
+        run: |
+          $zip = Join-Path $env:GITHUB_WORKSPACE "build\distributions\parasoft-report-transformer-1.0.2.zip"
+
+          if (-not (Test-Path $zip)) {
+            throw "ZIP file not found: $zip"
+          }
+
+          Expand-Archive -Path $zip -DestinationPath $env:GITHUB_WORKSPACE -Force
+
+      # Generate Jtest input
+      # Generates the jtest.data.json input file.
+      - name: Create input for Jtest
+        shell: bash
+        run: ./gradlew clean build jtest -I D:\parasoft-tools\All\2026.1.0\jtest\integration\gradle\init.gradle "-Djtest.skip=true"
+
+      # Run Jtest analysis
+      - name: Run Jtest
+        id: jtest
+        uses: parasoft/run-jtest-action@2.0.0
+        with:
+          installDir: D:/parasoft-tools/All/2026.1.0/jtest
+          testConfig: 'dtp://luffy'
+          input: build/jtest/jtest.data.json
+
+      # Convert XML report to SARIF
+      - name: Convert XML to SARIF
+        shell: powershell
+        run: |
+          $converter = Join-Path $env:GITHUB_WORKSPACE "parasoft-report-transformer-1.0.2\bin\XMLToSARIF.bat"
+          $inputFile = Join-Path $env:GITHUB_WORKSPACE "reports\report.xml"
+          $outputFile = Join-Path $env:GITHUB_WORKSPACE "reports\report-new.sarif"
+
+          if (-not (Test-Path $converter)) {
+            throw "Converter not found: $converter"
+          }
+
+          if (-not (Test-Path $inputFile)) {
+            throw "Input XML not found: $inputFile"
+          }
+
+          New-Item -ItemType Directory -Path (Split-Path $outputFile) -Force | Out-Null
+
+          & $converter -i $inputFile -o $outputFile
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "XML to SARIF conversion failed with exit code $LASTEXITCODE"
+          }
+
+          if (-not (Test-Path $outputFile)) {
+            throw "SARIF file was not generated: $outputFile"
+          }
+
+          Write-Host "SARIF file generated successfully: $outputFile"
+
+      # Upload SARIF results to GitHub Code Scanning
+      - name: Upload results (SARIF)
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: reports/report-new.sarif
+
+      # Archive reports
+      - name: Archive reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Static analysis reports
+          path: reports/*.*
+          if-no-files-found: warn

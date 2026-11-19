@@ -29,32 +29,54 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'CICD-1190' }}
 
-      # Verify source branch and commit
-      - name: Verify source branch and commit
-        shell: bash
+      # Verify source commit
+      - name: Verify source commit
+        shell: powershell
         run: |
-          echo "========================================"
-          echo "Transformer Source Information"
-          echo "========================================"
+          Write-Host "========================================"
+          Write-Host "Transformer Source Information"
+          Write-Host "========================================"
 
-          echo "Event: ${{ github.event_name }}"
-          echo "Branch: $(git branch --show-current)"
-          echo "Commit: $(git rev-parse HEAD)"
-          echo "Commit Message: $(git log -1 --pretty=%s)"
+          $commit = git rev-parse HEAD
+          $message = git log -1 --pretty=%s
 
-          echo "========================================"
+          Write-Host "Event: $env:GITHUB_EVENT_NAME"
+          Write-Host "Commit: $commit"
+          Write-Host "Commit Message: $message"
 
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            if [ "$(git rev-parse HEAD)" != "${{ github.sha }}" ]; then
-              echo "ERROR: Checked out commit does not match triggering commit!"
-              exit 1
-            fi
-          else
-            if [ "$(git rev-parse HEAD)" != "${{ github.event.pull_request.head.sha }}" ]; then
-              echo "ERROR: Checked out commit does not match PR source commit!"
-              exit 1
-            fi
-          fi
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
+            $expectedCommit = "${{ github.event.pull_request.head.sha }}"
+          }
+          elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $expectedCommit = $commit
+          }
+          else {
+            $expectedCommit = "${{ github.sha }}"
+          }
+
+          Write-Host "Expected Commit: $expectedCommit"
+
+          if ($commit -ne $expectedCommit) {
+            throw "ERROR: Checked out commit does not match expected commit!"
+          }
+
+          Write-Host "Source commit verification successful!"
+          Write-Host "========================================"
+
+      # Record build information
+      - name: Record build information
+        shell: powershell
+        run: |
+          Write-Host "========================================"
+          Write-Host "Build Information"
+          Write-Host "========================================"
+
+          Write-Host "Repository: $env:GITHUB_REPOSITORY"
+          Write-Host "Workspace: $env:GITHUB_WORKSPACE"
+          Write-Host "Run ID: $env:GITHUB_RUN_ID"
+          Write-Host "Run Number: $env:GITHUB_RUN_NUMBER"
+
+          Write-Host "========================================"
 
       # Build the project
       - name: Build the project
@@ -85,6 +107,8 @@ jobs:
           }
 
           Expand-Archive -Path $zip -DestinationPath $env:GITHUB_WORKSPACE -Force
+
+          Write-Host "Transformer extracted successfully."
 
       # Generate Jtest input
       # Generates the jtest.data.json input file.

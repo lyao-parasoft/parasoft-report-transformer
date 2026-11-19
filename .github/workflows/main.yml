@@ -4,10 +4,12 @@ name: Windows action
 
 on:
   push:
-    branches: [CICD-1190]
+    branches:
+      - '**'
 
   pull_request:
-    branches: [CICD-1190]
+    branches:
+      - '**'
 
   workflow_dispatch:
 
@@ -23,45 +25,67 @@ jobs:
 
     steps:
 
-      # Checkout repository
+      # Checkout the source branch
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || (github.event_name == 'workflow_dispatch' && github.ref || github.sha) }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
 
-      # Verify source commit
-      - name: Verify source commit
+      # Verify source branch and commit
+      - name: Verify source branch and commit
         shell: powershell
         run: |
           Write-Host "========================================"
           Write-Host "Transformer Source Information"
           Write-Host "========================================"
 
-          $commit = git rev-parse HEAD
+          git config --global --add safe.directory "$env:GITHUB_WORKSPACE"
+
+          $currentCommit = (git rev-parse HEAD).Trim()
           $message = git log -1 --pretty=%s
 
           Write-Host "Event: $env:GITHUB_EVENT_NAME"
           Write-Host "Repository: $env:GITHUB_REPOSITORY"
-          Write-Host "Commit: $commit"
+          Write-Host "Commit: $currentCommit"
           Write-Host "Commit Message: $message"
 
           if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
+            $sourceBranch = "${{ github.event.pull_request.head.ref }}"
+            $sourceRepository = "${{ github.event.pull_request.head.repo.full_name }}"
             $expectedCommit = "${{ github.event.pull_request.head.sha }}"
           }
-          elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
-            $expectedCommit = "${{ github.sha }}"
-          }
           else {
+            $sourceBranch = "${{ github.ref_name }}"
+            $sourceRepository = $env:GITHUB_REPOSITORY
             $expectedCommit = "${{ github.sha }}"
           }
 
+          Write-Host "Source Branch: $sourceBranch"
+          Write-Host "Source Repository: $sourceRepository"
           Write-Host "Expected Commit: $expectedCommit"
 
-          if ($commit -ne $expectedCommit) {
+          if ($currentCommit -ne $expectedCommit) {
             throw "ERROR: Checked out commit does not match expected commit!"
           }
 
-          Write-Host "Source commit verification successful!"
+          # Verify the checked-out commit belongs to the source branch.
+          git fetch origin "refs/heads/$sourceBranch"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "ERROR: Failed to fetch source branch: $sourceBranch"
+          }
+
+          $branchCommit = (git rev-parse FETCH_HEAD).Trim()
+
+          Write-Host "Current Commit: $currentCommit"
+          Write-Host "Remote Branch HEAD: $branchCommit"
+
+          if ($currentCommit -ne $branchCommit) {
+            throw "ERROR: Checked out commit does not match the latest source branch HEAD!"
+          }
+
+          Write-Host "SUCCESS: Source branch and commit verification passed."
           Write-Host "========================================"
 
       # Record build information

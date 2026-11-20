@@ -24,7 +24,6 @@ jobs:
     runs-on: [self-hosted, luffy-test]
 
     steps:
-
       # Checkout the source branch
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -152,11 +151,11 @@ jobs:
 
       # Convert XML report to SARIF
       - name: Convert XML to SARIF
+        id: convert
         shell: powershell
         run: |
           $converter = Join-Path $env:GITHUB_WORKSPACE "parasoft-report-transformer-1.0.2\bin\XMLToSARIF.bat"
-          $inputFile = Join-Path $env:GITHUB_WORKSPACE "reports\report.xml"
-          $outputFile = Join-Path $env:GITHUB_WORKSPACE "reports\report-new.sarif"
+          $inputFile = "D:\reports\parasoftreports\static_unit_coverage_reports\jtest\report-2024.2\jtest\static\report.xml"
 
           if (-not (Test-Path $converter)) {
             throw "Converter not found: $converter"
@@ -166,7 +165,21 @@ jobs:
             throw "Input XML not found: $inputFile"
           }
 
-          New-Item -ItemType Directory -Path (Split-Path $outputFile) -Force | Out-Null
+          # Use the PR source branch name for pull requests, otherwise use the current ref name.
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request" -and $env:GITHUB_HEAD_REF) {
+            $branchName = $env:GITHUB_HEAD_REF
+          }
+          else {
+            $branchName = $env:GITHUB_REF_NAME
+          }
+
+          # Replace characters that are unsuitable for filenames.
+          $safeBranchName = $branchName -replace '[^A-Za-z0-9._-]', '_'
+          $fileName = "report-$safeBranchName.sarif"
+
+          # Save the converted SARIF beside the input XML.
+          $outputDir = Split-Path -Parent $inputFile
+          $outputFile = Join-Path $outputDir $fileName
 
           & $converter -i $inputFile -o $outputFile
 
@@ -178,14 +191,29 @@ jobs:
             throw "SARIF file was not generated: $outputFile"
           }
 
-          Write-Host "SARIF file generated successfully: $outputFile"
+          Write-Host "SARIF file generated beside the input XML: $outputFile"
+
+          # Copy a workspace copy for upload and artifact archiving.
+          $workspaceReports = Join-Path $env:GITHUB_WORKSPACE "reports"
+          New-Item -ItemType Directory -Path $workspaceReports -Force | Out-Null
+          Copy-Item $outputFile (Join-Path $workspaceReports $fileName) -Force
+
+          # Set the path consumed by the SARIF upload step.
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::AppendAllText(
+            $env:GITHUB_OUTPUT,
+            "sarif_file=reports/$fileName`n",
+            $utf8NoBom
+          )
+
+          Write-Host "Workspace copy created: $(Join-Path $workspaceReports $fileName)"
 
       # Upload SARIF results to GitHub Code Scanning
       - name: Upload results (SARIF)
-        if: always()
+        if: always() && steps.convert.outcome == 'success'
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: reports/report-new.sarif
+          sarif_file: ${{ steps.convert.outputs.sarif_file }}
 
       # Archive reports
       - name: Archive reports

@@ -1,0 +1,224 @@
+# This is a workflow to analyze the project with Jtest.
+name: Windows action
+
+on:
+  push:
+    branches:
+      - '**'
+
+  pull_request:
+    branches:
+      - '**'
+
+  workflow_dispatch:
+
+jobs:
+  build-on-windows:
+    name: Analyze project with Jtest
+
+    permissions:
+      contents: read
+      security-events: write
+
+    runs-on: [self-hosted, luffy-test]
+
+    steps:
+      # Checkout the source branch
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      # Verify source branch and commit
+      - name: Verify source branch and commit
+        shell: powershell
+        run: |
+          Write-Host "========================================"
+          Write-Host "Transformer Source Information"
+          Write-Host "========================================"
+
+          git config --global --add safe.directory "$env:GITHUB_WORKSPACE"
+
+          $currentCommit = (git rev-parse HEAD).Trim()
+          $message = git log -1 --pretty=%s
+
+          Write-Host "Event: $env:GITHUB_EVENT_NAME"
+          Write-Host "Repository: $env:GITHUB_REPOSITORY"
+          Write-Host "Commit: $currentCommit"
+          Write-Host "Commit Message: $message"
+
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
+            $sourceBranch = "${{ github.event.pull_request.head.ref }}"
+            $sourceRepository = "${{ github.event.pull_request.head.repo.full_name }}"
+            $expectedCommit = "${{ github.event.pull_request.head.sha }}"
+          }
+          else {
+            $sourceBranch = "${{ github.ref_name }}"
+            $sourceRepository = $env:GITHUB_REPOSITORY
+            $expectedCommit = "${{ github.sha }}"
+          }
+
+          Write-Host "Source Branch: $sourceBranch"
+          Write-Host "Source Repository: $sourceRepository"
+          Write-Host "Expected Commit: $expectedCommit"
+
+          if ($currentCommit -ne $expectedCommit) {
+            throw "ERROR: Checked out commit does not match expected commit!"
+          }
+
+          # Verify the checked-out commit belongs to the source branch.
+          git fetch origin "refs/heads/$sourceBranch"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "ERROR: Failed to fetch source branch: $sourceBranch"
+          }
+
+          $branchCommit = (git rev-parse FETCH_HEAD).Trim()
+
+          Write-Host "Current Commit: $currentCommit"
+          Write-Host "Remote Branch HEAD: $branchCommit"
+
+          if ($currentCommit -ne $branchCommit) {
+            throw "ERROR: Checked out commit does not match the latest source branch HEAD!"
+          }
+
+          Write-Host "SUCCESS: Source branch and commit verification passed."
+          Write-Host "========================================"
+
+      # Record build information
+      - name: Record build information
+        shell: powershell
+        run: |
+          Write-Host "========================================"
+          Write-Host "Build Information"
+          Write-Host "========================================"
+
+          Write-Host "Repository: $env:GITHUB_REPOSITORY"
+          Write-Host "Workspace: $env:GITHUB_WORKSPACE"
+          Write-Host "Run ID: $env:GITHUB_RUN_ID"
+          Write-Host "Run Number: $env:GITHUB_RUN_NUMBER"
+
+          Write-Host "========================================"
+
+      # Build the project
+      - name: Build the project
+        shell: bash
+        run: ./gradlew clean build
+
+      # Verify build artifact
+      - name: Verify build artifact
+        shell: powershell
+        run: |
+          $zip = Join-Path $env:GITHUB_WORKSPACE "build\distributions\parasoft-report-transformer-1.0.2.zip"
+
+          if (-not (Test-Path $zip)) {
+            throw "Build artifact not found: $zip"
+          }
+
+          Write-Host "Build artifact generated successfully:"
+          Get-Item $zip | Format-List FullName, Length, LastWriteTime
+
+      # Unzip Report Transformer
+      - name: Unzip the parasoft-report-transformer
+        shell: powershell
+        run: |
+          $zip = Join-Path $env:GITHUB_WORKSPACE "build\distributions\parasoft-report-transformer-1.0.2.zip"
+
+          if (-not (Test-Path $zip)) {
+            throw "ZIP file not found: $zip"
+          }
+
+          Expand-Archive -Path $zip -DestinationPath $env:GITHUB_WORKSPACE -Force
+
+          Write-Host "Transformer extracted successfully."
+
+      # Generate Jtest input
+      # Generates the jtest.data.json input file.
+      - name: Create input for Jtest
+        shell: bash
+        run: ./gradlew clean build jtest -I "D:/parasoft-tools/All/2026.1.0/jtest/integration/gradle/init.gradle" "-Djtest.skip=true"
+
+      # Run Jtest analysis
+      - name: Run Jtest
+        id: jtest
+        uses: parasoft/run-jtest-action@2.0.0
+        with:
+          installDir: D:/parasoft-tools/All/2026.1.0/jtest
+          testConfig: 'dtp://luffy'
+          input: build/jtest/jtest.data.json
+
+      # Convert XML report to SARIF
+      - name: Convert XML to SARIF
+        id: convert
+        shell: powershell
+        run: |
+          $converter = Join-Path $env:GITHUB_WORKSPACE "parasoft-report-transformer-1.0.2\bin\XMLToSARIF.bat"
+          $inputFile = "D:\reports\parasoftreports\static_unit_coverage_reports\jtest\report-2024.2\jtest\static\report.xml"
+
+          if (-not (Test-Path $converter)) {
+            throw "Converter not found: $converter"
+          }
+
+          if (-not (Test-Path $inputFile)) {
+            throw "Input XML not found: $inputFile"
+          }
+
+          # Use the PR source branch name for pull requests, otherwise use the current ref name.
+          if ($env:GITHUB_EVENT_NAME -eq "pull_request" -and $env:GITHUB_HEAD_REF) {
+            $branchName = $env:GITHUB_HEAD_REF
+          }
+          else {
+            $branchName = $env:GITHUB_REF_NAME
+          }
+
+          # Replace characters that are unsuitable for filenames.
+          $safeBranchName = $branchName -replace '[^A-Za-z0-9._-]', '_'
+          $fileName = "report-$safeBranchName.sarif"
+
+          # Save the converted SARIF beside the input XML.
+          $outputDir = Split-Path -Parent $inputFile
+          $outputFile = Join-Path $outputDir $fileName
+
+          & $converter -i $inputFile -o $outputFile
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "XML to SARIF conversion failed with exit code $LASTEXITCODE"
+          }
+
+          if (-not (Test-Path $outputFile)) {
+            throw "SARIF file was not generated: $outputFile"
+          }
+
+          Write-Host "SARIF file generated beside the input XML: $outputFile"
+
+          # Copy a workspace copy for upload and artifact archiving.
+          $workspaceReports = Join-Path $env:GITHUB_WORKSPACE "reports"
+          New-Item -ItemType Directory -Path $workspaceReports -Force | Out-Null
+          Copy-Item $outputFile (Join-Path $workspaceReports $fileName) -Force
+
+          # Set the path consumed by the SARIF upload step.
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::AppendAllText(
+            $env:GITHUB_OUTPUT,
+            "sarif_file=reports/$fileName`n",
+            $utf8NoBom
+          )
+
+          Write-Host "Workspace copy created: $(Join-Path $workspaceReports $fileName)"
+
+      # Upload SARIF results to GitHub Code Scanning
+      - name: Upload results (SARIF)
+        if: always() && steps.convert.outcome == 'success'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.convert.outputs.sarif_file }}
+
+      # Archive reports
+      - name: Archive reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Static analysis reports
+          path: reports/*.*
+          if-no-files-found: warn

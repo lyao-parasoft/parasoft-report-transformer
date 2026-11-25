@@ -1,5 +1,5 @@
-# This is a workflow to analyze the project with Jtest.
-name: Windows action
+# Validate a published Report Transformer ZIP without building or analyzing source code.
+name: Windows release validation
 
 on:
   push:
@@ -13,8 +13,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-on-windows:
-    name: Analyze project with Jtest
+  validate-release-on-windows:
+    name: Validate released transformer
 
     permissions:
       contents: read
@@ -23,198 +23,232 @@ jobs:
     runs-on: [self-hosted, luffy-test]
 
     steps:
-      # Checkout the source branch
+      # Checkout only to identify the workflow branch/commit and provide a clean workspace.
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
 
-      # Verify source branch and commit
-      - name: Verify source branch and commit
+      - name: Verify workflow branch and commit
         shell: powershell
+        env:
+          EXPECTED_COMMIT: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
         run: |
-          Write-Host "========================================"
-          Write-Host "Transformer Source Information"
-          Write-Host "========================================"
-
           git config --global --add safe.directory "$env:GITHUB_WORKSPACE"
-
           $currentCommit = (git rev-parse HEAD).Trim()
-          $message = git log -1 --pretty=%s
-
-          Write-Host "Event: $env:GITHUB_EVENT_NAME"
-          Write-Host "Repository: $env:GITHUB_REPOSITORY"
-          Write-Host "Commit: $currentCommit"
-          Write-Host "Commit Message: $message"
-
-          if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
-            $sourceBranch = "${{ github.event.pull_request.head.ref }}"
-            $sourceRepository = "${{ github.event.pull_request.head.repo.full_name }}"
-            $expectedCommit = "${{ github.event.pull_request.head.sha }}"
-          }
-          else {
-            $sourceBranch = "${{ github.ref_name }}"
-            $sourceRepository = $env:GITHUB_REPOSITORY
-            $expectedCommit = "${{ github.sha }}"
-          }
-
-          Write-Host "Source Branch: $sourceBranch"
-          Write-Host "Source Repository: $sourceRepository"
-          Write-Host "Expected Commit: $expectedCommit"
-
-          if ($currentCommit -ne $expectedCommit) {
-            throw "ERROR: Checked out commit does not match expected commit!"
-          }
-
-          # Verify the checked-out commit belongs to the source branch.
-          git fetch origin "refs/heads/$sourceBranch"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "ERROR: Failed to fetch source branch: $sourceBranch"
-          }
-
-          $branchCommit = (git rev-parse FETCH_HEAD).Trim()
-
-          Write-Host "Current Commit: $currentCommit"
-          Write-Host "Remote Branch HEAD: $branchCommit"
-
-          if ($currentCommit -ne $branchCommit) {
-            throw "ERROR: Checked out commit does not match the latest source branch HEAD!"
-          }
-
-          Write-Host "SUCCESS: Source branch and commit verification passed."
-          Write-Host "========================================"
-
-      # Record build information
-      - name: Record build information
-        shell: powershell
-        run: |
-          Write-Host "========================================"
-          Write-Host "Build Information"
-          Write-Host "========================================"
-
-          Write-Host "Repository: $env:GITHUB_REPOSITORY"
-          Write-Host "Workspace: $env:GITHUB_WORKSPACE"
+          $branchName = if ($env:GITHUB_EVENT_NAME -eq 'pull_request') { $env:GITHUB_HEAD_REF } else { $env:GITHUB_REF_NAME }
+          Write-Host "Validation mode: published release (no source build or Jtest)"
+          Write-Host "Workflow repository: $env:GITHUB_REPOSITORY"
+          Write-Host "Workflow branch: $branchName"
+          Write-Host "Workflow commit: $currentCommit"
           Write-Host "Run ID: $env:GITHUB_RUN_ID"
-          Write-Host "Run Number: $env:GITHUB_RUN_NUMBER"
-
-          Write-Host "========================================"
-
-      # Build the project
-      - name: Build the project
-        shell: bash
-        run: ./gradlew clean build
-
-      # Verify build artifact
-      - name: Verify build artifact
-        shell: powershell
-        run: |
-          $zip = Join-Path $env:GITHUB_WORKSPACE "build\distributions\parasoft-report-transformer-1.0.2.zip"
-
-          if (-not (Test-Path $zip)) {
-            throw "Build artifact not found: $zip"
+          Write-Host "Workspace: $env:GITHUB_WORKSPACE"
+          if ($currentCommit -ne $env:EXPECTED_COMMIT) {
+            throw 'Checked out workflow commit does not match the expected event commit.'
+          }
+          git fetch origin "refs/heads/$branchName"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to fetch workflow branch: $branchName" }
+          if ((git rev-parse FETCH_HEAD).Trim() -ne $currentCommit) {
+            throw 'Checked out workflow commit does not match the latest branch HEAD.'
           }
 
-          Write-Host "Build artifact generated successfully:"
-          Get-Item $zip | Format-List FullName, Length, LastWriteTime
-
-      # Unzip Report Transformer
-      - name: Unzip the parasoft-report-transformer
+      - name: Download and extract latest release
+        id: download
         shell: powershell
         run: |
-          $zip = Join-Path $env:GITHUB_WORKSPACE "build\distributions\parasoft-report-transformer-1.0.2.zip"
-
-          if (-not (Test-Path $zip)) {
-            throw "ZIP file not found: $zip"
+          $ErrorActionPreference = 'Stop'
+          # Functions embedded into the release workflow; loading this file has no side effects.
+          function Get-ReleaseZipLinks {
+              param([Parameter(Mandatory = $true)][Uri]$DirectoryUri, [string]$Html)
+              $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+              $links = [Collections.Generic.List[object]]::new()
+              $pattern = '(?is)<a\b[^>]*\bhref\s*=\s*(?:"(?<href>[^"]*)"|''(?<href>[^'']*)'')'
+              foreach ($match in [regex]::Matches($Html, $pattern)) {
+                  $href = [Net.WebUtility]::HtmlDecode($match.Groups['href'].Value)
+                  try { $uri = [Uri]::new($DirectoryUri, $href) } catch { continue }
+                  if ($uri.Scheme -cne 'https' -or $uri.Authority -ine $DirectoryUri.Authority -or
+                      $uri.Query -or $uri.Fragment -or
+                      -not $uri.AbsolutePath.StartsWith($DirectoryUri.AbsolutePath, [StringComparison]::Ordinal)) { continue }
+                  $name = [Uri]::UnescapeDataString($uri.AbsolutePath.Substring($DirectoryUri.AbsolutePath.Length))
+                  if ($name -cnotmatch '^parasoft-report-transformer-[A-Za-z0-9][A-Za-z0-9._+-]*\.zip$') { continue }
+                  if ($seen.Add($uri.AbsoluteUri)) { $links.Add([pscustomobject]@{ Name = $name; Url = $uri.AbsoluteUri }) }
+              }
+              return $links.ToArray()
           }
+          
+          function Get-ReleaseResponseUri {
+              param([Uri]$DirectoryUri, $Response)
+              $uri = $Response.BaseResponse.ResponseUri
+              if (-not $uri -or $uri.Scheme -cne 'https' -or $uri.Authority -ine $DirectoryUri.Authority) {
+                  throw 'Release server redirected outside the expected HTTPS origin.'
+              }
+              return $uri
+          }
+          
+          function Get-ReleaseLastModified {
+              param($Headers)
+              if (-not $Headers['Last-Modified']) { return $null }
+              return [DateTimeOffset]::Parse([string]$Headers['Last-Modified'], [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+          }
+          
+          function Get-ReleaseTransformer {
+              [CmdletBinding()]
+              param(
+                  [string]$DirectoryUrl = 'https://distros.parasoftcn.com/cicd-plugins/parasoft-findings/parasoft-report-transformer/builds/latest_build/',
+                  [Parameter(Mandatory = $true)][string]$Workspace
+              )
+              $ErrorActionPreference = 'Stop'
+              $ProgressPreference = 'SilentlyContinue'
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              $directoryUri = [Uri]$DirectoryUrl
+              if (-not $directoryUri.IsAbsoluteUri -or $directoryUri.Scheme -cne 'https' -or
+                  -not $directoryUri.AbsolutePath.EndsWith('/') -or $directoryUri.Query -or $directoryUri.Fragment) {
+                  throw 'Release directory must be an absolute HTTPS URL ending in / without a query or fragment.'
+              }
+              if (-not (Test-Path -LiteralPath $Workspace -PathType Container)) { throw "Workspace not found: $Workspace" }
+              $headers = @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' }
+              # HTTP does not expand *.zip: discover only direct ZIP links within latest_build/.
+              $index = Invoke-WebRequest -UseBasicParsing -Uri $directoryUri.AbsoluteUri -Headers $headers -TimeoutSec 60
+              Get-ReleaseResponseUri $directoryUri $index | Out-Null
+              $links = @(Get-ReleaseZipLinks $directoryUri ([string]$index.Content))
+              if ($links.Count -eq 0) { throw "No parasoft-report-transformer-*.zip found in $DirectoryUrl" }
+              $packages = @(foreach ($link in $links) {
+                  $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri $link.Url -Headers $headers -TimeoutSec 60
+                  Get-ReleaseResponseUri $directoryUri $response | Out-Null
+                  $length = $null
+                  if ($response.Headers['Content-Length']) { $length = [long]::Parse([string]$response.Headers['Content-Length']) }
+                  [pscustomobject]@{
+                      Name = $link.Name; Url = $link.Url; Length = $length
+                      LastModified = Get-ReleaseLastModified $response.Headers
+                      ETag = [string]$response.Headers['ETag']
+                  }
+              })
+              if ($packages.Count -gt 1) {
+                  if (@($packages | Where-Object { $null -eq $_.LastModified }).Count -gt 0) {
+                      throw 'Multiple release ZIPs found without complete Last-Modified headers; cannot identify the latest package.'
+                  }
+                  $packages = @($packages | Sort-Object LastModified -Descending)
+                  if ($packages[0].LastModified -eq $packages[1].LastModified) {
+                      throw 'Multiple release ZIPs share the latest Last-Modified timestamp; refusing an ambiguous package.'
+                  }
+              }
+              $package = $packages[0]
+              # Unique, short workspace paths prevent reuse of an old package or extracted converter.
+              $scratch = Join-Path $Workspace ('rt-release-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+              New-Item -ItemType Directory -Path $scratch | Out-Null
+              $zip = Join-Path $scratch $package.Name
+              $downloadHeaders = @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' }
+              if ($package.ETag -and -not $package.ETag.StartsWith('W/')) { $downloadHeaders['If-Match'] = $package.ETag }
+              elseif ($package.LastModified) { $downloadHeaders['If-Unmodified-Since'] = $package.LastModified.ToString('r') }
+              Write-Host "Downloading release package: $($package.Url)"
+              $download = Invoke-WebRequest -UseBasicParsing -Uri $package.Url -Headers $downloadHeaders `
+                  -OutFile $zip -PassThru -TimeoutSec 600
+              $resolvedUri = Get-ReleaseResponseUri $directoryUri $download
+              $length = (Get-Item -LiteralPath $zip).Length
+              if ($length -le 0 -or ($null -ne $package.Length -and $length -ne $package.Length)) {
+                  throw 'Release ZIP is empty or its length differs from HEAD; download incomplete or latest_build changed.'
+              }
+              $modified = Get-ReleaseLastModified $download.Headers
+              if (($package.LastModified -and $modified -and $package.LastModified -ne $modified) -or
+                  ($package.ETag -and $download.Headers['ETag'] -and $package.ETag -cne [string]$download.Headers['ETag'])) {
+                  throw 'Release package changed between HEAD and download. Retry with a stable latest_build.'
+              }
+              $sha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+              $extracted = Join-Path $scratch 'extracted'
+              # Validate all archive paths before extracting any files on the self-hosted runner.
+              Add-Type -AssemblyName System.IO.Compression.FileSystem
+              Add-Type -AssemblyName System.IO.Compression
+              $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+              try {
+                  $prefix = [IO.Path]::GetFullPath($extracted).TrimEnd('\') + '\'
+                  foreach ($entry in $archive.Entries) {
+                      $path = [IO.Path]::GetFullPath([IO.Path]::Combine($extracted, $entry.FullName.Replace('/', '\')))
+                      if (-not $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+                          throw "Unsafe release ZIP entry outside extraction directory: $($entry.FullName)"
+                      }
+                  }
+              }
+              finally { $archive.Dispose() }
+              Expand-Archive -LiteralPath $zip -DestinationPath $extracted -Force
+              $converters = @(Get-ChildItem -LiteralPath $extracted -Recurse -File -Filter 'XMLToSARIF.bat' | Where-Object {
+                  $_.Directory.Name -ieq 'bin'
+              })
+              if ($converters.Count -ne 1) { throw "Expected exactly one bin/XMLToSARIF.bat in release ZIP; found $($converters.Count)." }
+              $metadata = [ordered]@{
+                  name = $package.Name; url = $package.Url; resolvedUrl = $resolvedUri.AbsoluteUri
+                  sha256 = $sha256; length = $length
+                  lastModifiedUtc = if ($modified) { $modified.ToString('o') } else { $null }
+                  downloadedAtUtc = [DateTime]::UtcNow.ToString('o')
+              }
+              $reports = Join-Path $Workspace 'reports'
+              New-Item -ItemType Directory -Path $reports -Force | Out-Null
+              $metadataPath = Join-Path $reports 'release-package.json'
+              [IO.File]::WriteAllText($metadataPath, ($metadata | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+              Write-Host "Release ZIP SHA-256: $sha256"
+              Write-Host "Released converter: $($converters[0].FullName)"
+              return [pscustomobject]@{ ConverterPath = $converters[0].FullName; MetadataPath = $metadataPath; Package = $metadata }
+          }
+          $release = Get-ReleaseTransformer -Workspace $env:GITHUB_WORKSPACE
+          $outputs = @(
+            "converter_path=$($release.ConverterPath)",
+            "package_name=$($release.Package.name)",
+            "package_sha256=$($release.Package.sha256)"
+          )
+          [IO.File]::AppendAllText(
+            $env:GITHUB_OUTPUT,
+            ($outputs -join "`n") + "`n",
+            [Text.UTF8Encoding]::new($false)
+          )
 
-          Expand-Archive -Path $zip -DestinationPath $env:GITHUB_WORKSPACE -Force
-
-          Write-Host "Transformer extracted successfully."
-
-      # Generate Jtest input
-      # Generates the jtest.data.json input file.
-      - name: Create input for Jtest
-        shell: bash
-        run: ./gradlew clean build jtest -I "D:/parasoft-tools/All/2026.1.0/jtest/integration/gradle/init.gradle" "-Djtest.skip=true"
-
-      # Run Jtest analysis
-      - name: Run Jtest
-        id: jtest
-        uses: parasoft/run-jtest-action@2.0.0
-        with:
-          installDir: D:/parasoft-tools/All/2026.1.0/jtest
-          testConfig: 'dtp://luffy'
-          input: build/jtest/jtest.data.json
-
-      # Convert XML report to SARIF
       - name: Convert XML to SARIF
         id: convert
         shell: powershell
+        env:
+          RELEASE_CONVERTER: ${{ steps.download.outputs.converter_path }}
         run: |
-          $converter = Join-Path $env:GITHUB_WORKSPACE "parasoft-report-transformer-1.0.2\bin\XMLToSARIF.bat"
+          $converter = $env:RELEASE_CONVERTER
           $inputFile = "D:\reports\parasoftreports\static_unit_coverage_reports\jtest\report-2024.2\jtest\static\report.xml"
 
-          if (-not (Test-Path $converter)) {
-            throw "Converter not found: $converter"
+          if (-not (Test-Path -LiteralPath $converter -PathType Leaf)) {
+            throw "Released converter not found: $converter"
           }
-
-          if (-not (Test-Path $inputFile)) {
+          if (-not (Test-Path -LiteralPath $inputFile -PathType Leaf)) {
             throw "Input XML not found: $inputFile"
           }
-
-          # Use the PR source branch name for pull requests, otherwise use the current ref name.
-          if ($env:GITHUB_EVENT_NAME -eq "pull_request" -and $env:GITHUB_HEAD_REF) {
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request' -and $env:GITHUB_HEAD_REF) {
             $branchName = $env:GITHUB_HEAD_REF
-          }
-          else {
+          } else {
             $branchName = $env:GITHUB_REF_NAME
           }
-
-          # Replace characters that are unsuitable for filenames.
           $safeBranchName = $branchName -replace '[^A-Za-z0-9._-]', '_'
           $fileName = "report-$safeBranchName.sarif"
-
-          # Save the converted SARIF beside the input XML.
-          $outputDir = Split-Path -Parent $inputFile
-          $outputFile = Join-Path $outputDir $fileName
+          $outputFile = Join-Path (Split-Path -Parent $inputFile) $fileName
 
           & $converter -i $inputFile -o $outputFile
-
           if ($LASTEXITCODE -ne 0) {
             throw "XML to SARIF conversion failed with exit code $LASTEXITCODE"
           }
-
-          if (-not (Test-Path $outputFile)) {
+          if (-not (Test-Path -LiteralPath $outputFile -PathType Leaf)) {
             throw "SARIF file was not generated: $outputFile"
           }
+          Write-Host "Release SARIF generated beside the input XML: $outputFile"
 
-          Write-Host "SARIF file generated beside the input XML: $outputFile"
-
-          # Copy a workspace copy for upload and artifact archiving.
-          $workspaceReports = Join-Path $env:GITHUB_WORKSPACE "reports"
+          $workspaceReports = Join-Path $env:GITHUB_WORKSPACE 'reports'
           New-Item -ItemType Directory -Path $workspaceReports -Force | Out-Null
-          Copy-Item $outputFile (Join-Path $workspaceReports $fileName) -Force
-
-          # Set the path consumed by the SARIF upload step.
-          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-          [System.IO.File]::AppendAllText(
+          Copy-Item -LiteralPath $outputFile -Destination (Join-Path $workspaceReports $fileName) -Force
+          [IO.File]::AppendAllText(
             $env:GITHUB_OUTPUT,
             "sarif_file=reports/$fileName`n",
-            $utf8NoBom
+            [Text.UTF8Encoding]::new($false)
           )
 
-          Write-Host "Workspace copy created: $(Join-Path $workspaceReports $fileName)"
-
-      # Upload SARIF results to GitHub Code Scanning
       - name: Upload results (SARIF)
         if: always() && steps.convert.outcome == 'success'
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ steps.convert.outputs.sarif_file }}
 
-      # Archive reports
       - name: Archive reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -223,4 +257,4 @@ jobs:
           path: reports/*.*
           if-no-files-found: warn
 
-# Fork validation run: 2026-11-24T09:08:09.6518852Z 24b40a080b314e0c87b7d9c95248855b
+# Fork validation run: 2026-11-25T02:08:00.2159600Z 55f95bd0655741a7b64c838a7ef82ca6

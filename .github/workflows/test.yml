@@ -53,9 +53,11 @@ jobs:
             throw 'Checked out workflow commit does not match the latest branch HEAD.'
           }
 
-      - name: Download and extract latest release
+      - name: Download and extract release
         id: download
         shell: powershell
+        env:
+          RELEASE_VERSION: 'v1.0.3'
         run: |
           $ErrorActionPreference = 'Stop'
           # Functions embedded into the release workflow; loading this file has no side effects.
@@ -78,9 +80,11 @@ jobs:
           }
           
           function Get-ReleaseResponseUri {
-              param([Uri]$DirectoryUri, $Response)
+              param([Uri]$DirectoryUri, $Response, [switch]$GitHubAsset)
               $uri = $Response.BaseResponse.ResponseUri
-              if (-not $uri -or $uri.Scheme -cne 'https' -or $uri.Authority -ine $DirectoryUri.Authority) {
+              if (-not $uri -or $uri.Scheme -cne 'https' -or $uri.UserInfo -or
+                  ($uri.Authority -ine $DirectoryUri.Authority -and
+                      -not ($GitHubAsset -and $uri.Authority -ieq 'release-assets.githubusercontent.com'))) {
                   throw 'Release server redirected outside the expected HTTPS origin.'
               }
               return $uri
@@ -92,48 +96,169 @@ jobs:
               return [DateTimeOffset]::Parse([string]$Headers['Last-Modified'], [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
           }
           
+          function Get-ReleaseBuildInfo {
+              param([Uri]$DirectoryUri, [string]$Html, [string]$PackageName, $Properties)
+              # IWR returns byte[] for build.properties served as application/octet-stream.
+              $Properties = if ($Properties -is [byte[]]) { [Text.Encoding]::UTF8.GetString($Properties) } else { [string]$Properties }
+              $Properties = $Properties.TrimStart([char]0xFEFF)
+              $values = @{}
+              foreach ($match in [regex]::Matches($Properties, '(?m)^(?<key>build\.name|build\.id|version\.timestamp)\s*=\s*(?<value>[^\r\n]*)')) {
+                  $values[$match.Groups['key'].Value] = $match.Groups['value'].Value.Trim()
+              }
+              # The Apache index exposes the real dated build directory next to each ZIP link.
+              $parent = [Uri]::new($DirectoryUri, '../')
+              $directories = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+              $pattern = '(?is)<a\b[^>]*\bhref\s*=\s*(?:"(?<href>[^"]*)"|''(?<href>[^'']*)'')'
+              foreach ($match in [regex]::Matches($Html, $pattern)) {
+                  try { $uri = [Uri]::new($DirectoryUri, [Net.WebUtility]::HtmlDecode($match.Groups['href'].Value)) } catch { continue }
+                  if ($uri.Scheme -cne 'https' -or $uri.Authority -ine $DirectoryUri.Authority -or $uri.Query -or $uri.Fragment -or
+                      -not $uri.AbsolutePath.StartsWith($parent.AbsolutePath, [StringComparison]::Ordinal)) { continue }
+                  $relative = [Uri]::UnescapeDataString($uri.AbsolutePath.Substring($parent.AbsolutePath.Length))
+                  if ($relative -cmatch '^(?<build>\d{4}-\d{2}-\d{2}-\d{4})/files/(?<file>[^/]+)$' -and $Matches.file -ceq $PackageName) {
+                      $directories.Add($Matches.build) | Out-Null
+                  }
+              }
+              if ($directories.Count -gt 1) { throw 'Ambiguous build directories for the selected ZIP; cannot identify its build date.' }
+              $directoryName = @($directories)[0]
+              $name = if ($values['build.name']) { $values['build.name'] } else { $directoryName }
+              if ($directoryName -and $values['build.name'] -and $directoryName -cne $values['build.name']) {
+                  throw 'Publisher build.properties disagrees with the ZIP directory; latest_build may have changed. Retry.'
+              }
+              $date = [DateTime]::MinValue
+              $nameDate = [DateTime]::MinValue
+              $hasNameDate = [DateTime]::TryParseExact([string]$name, 'yyyy-MM-dd-HHmm',
+                  [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$nameDate)
+              $hasDate = [DateTime]::TryParseExact([string]$values['version.timestamp'], 'yyyyMMddHHmm',
+                  [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$date)
+              $source = $null
+              if ($hasDate) {
+                  if ($hasNameDate -and $date -ne $nameDate) { throw 'Publisher build name and version.timestamp disagree.' }
+                  $source = 'build.properties:version.timestamp'
+              } elseif ($hasNameDate) {
+                  $date = $nameDate
+                  $source = if ($values['build.name']) { 'build.properties:build.name' } else { 'ZIP directory name' }
+              }
+              $raw = [regex]::Match($Properties, '(?m)^#\s*(?<timestamp>(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+[^\r\n]*\b\d{4})\s*$')
+              return [pscustomobject]@{
+                  buildName = $name; buildId = $values['build.id']
+                  buildDate = if ($source) { $date.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture) } else { $null }
+                  buildDateSource = $source
+                  publisherTimestamp = if ($raw.Success) { $raw.Groups['timestamp'].Value.Trim() } else { $null }
+              }
+          }
+          
+          function Get-GitHubReleasePackage {
+              param([Parameter(Mandatory = $true)][string]$Tag)
+              $api = [Uri]("https://api.github.com/repos/parasoft/parasoft-report-transformer/releases/tags/" + [Uri]::EscapeDataString($Tag))
+              $response = Invoke-WebRequest -UseBasicParsing -Uri $api.AbsoluteUri -TimeoutSec 60 -Headers @{
+                  Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28'
+                  'Cache-Control' = 'no-cache'; Pragma = 'no-cache'
+              }
+              Get-ReleaseResponseUri $api $response | Out-Null
+              $release = $response.Content | ConvertFrom-Json
+              if ($release.tag_name -cne $Tag -or $release.draft -ne $false -or
+                  $release.html_url -cne "https://github.com/parasoft/parasoft-report-transformer/releases/tag/$Tag" -or
+                  -not $release.published_at) { throw 'GitHub release identity does not match the requested published tag.' }
+              $name = 'parasoft-report-transformer-' + $Tag.Substring(1) + '.zip'
+              $assets = @($release.assets | Where-Object { $_.name -ceq $name })
+              if ($assets.Count -ne 1) { throw "Expected exactly one $name asset in GitHub release $Tag; found $($assets.Count)." }
+              $asset = $assets[0]
+              $url = "https://github.com/parasoft/parasoft-report-transformer/releases/download/$Tag/$name"
+              $length = 0L
+              if ($asset.browser_download_url -cne $url -or $asset.state -cne 'uploaded' -or
+                  [string]$asset.id -notmatch '^[1-9][0-9]*$' -or
+                  -not [long]::TryParse([string]$asset.size, [ref]$length) -or $length -le 0 -or
+                  ($asset.digest -and $asset.digest -cnotmatch '^sha256:[0-9a-fA-F]{64}$')) {
+                  throw 'Invalid GitHub release ZIP URL, state, size or SHA-256 digest.'
+              }
+              return [pscustomobject]@{
+                  Name = $name; Url = $url; Length = $length; LastModified = $null; ETag = ''
+                  Tag = $Tag; ReleaseUrl = $release.html_url; PublishedAt = [string]$release.published_at
+                  AssetId = $asset.id; AssetUpdatedAt = [string]$asset.updated_at
+                  ExpectedSha256 = if ($asset.digest) { $asset.digest.Substring(7) } else { $null }
+              }
+          }
+          
+          function Write-ReleasePackageDates($Package) {
+              if ($Package.source -eq 'github-release') {
+                  Write-Host "GitHub release: $($Package.releaseTag) | $($Package.releaseUrl)"
+                  Write-Host "GitHub release published at (UTC): $($Package.publishedAtUtc)"
+                  Write-Host "GitHub release asset ID: $($Package.assetId)"
+              }
+              if ($Package.buildDate) {
+                  Write-Host "Release build name: $($Package.buildName)"
+                  Write-Host "Release build date/time (publisher local time; no UTC offset supplied): $($Package.buildDate)"
+                  Write-Host "Release build date source: $($Package.buildDateSource)"
+                  if ($Package.buildId) { Write-Host "Release build ID: $($Package.buildId)" }
+                  if ($Package.publisherTimestamp) { Write-Host "Publisher timestamp (as provided): $($Package.publisherTimestamp)" }
+              } else {
+                  Write-Warning 'Release build date unavailable: publisher supplied no usable build metadata. ZIP Last-Modified is NOT a build date.'
+              }
+              if ($Package.lastModifiedUtc) {
+                  $modified = [DateTimeOffset]::Parse([string]$Package.lastModifiedUtc, [Globalization.CultureInfo]::InvariantCulture)
+                  Write-Host "Release ZIP Last-Modified (UTC): $($modified.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss zzz', [Globalization.CultureInfo]::InvariantCulture))"
+                  Write-Host "Release ZIP Last-Modified (UTC+08:00): $($modified.ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd HH:mm:ss zzz', [Globalization.CultureInfo]::InvariantCulture))"
+              } else { Write-Warning 'Release ZIP Last-Modified unavailable: server did not supply the header.' }
+          }
+          
           function Get-ReleaseTransformer {
               [CmdletBinding()]
               param(
                   [string]$DirectoryUrl = 'https://distros.parasoftcn.com/cicd-plugins/parasoft-findings/parasoft-report-transformer/builds/latest_build/',
+                  [string]$ReleaseVersion = '',
                   [Parameter(Mandatory = $true)][string]$Workspace
               )
               $ErrorActionPreference = 'Stop'
               $ProgressPreference = 'SilentlyContinue'
               [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              if ($ReleaseVersion -and $ReleaseVersion -cnotmatch '\Av?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z][0-9A-Za-z.+-]*)?\z') {
+                  throw 'Invalid release version; use a version such as v1.0.3 or 1.0.3.'
+              }
+              $githubRelease = [bool]$ReleaseVersion
+              if ($githubRelease -and $PSBoundParameters.ContainsKey('DirectoryUrl')) {
+                  throw '-ReleaseVersion cannot be combined with -DirectoryUrl.'
+              }
               $directoryUri = [Uri]$DirectoryUrl
+              if ($githubRelease) {
+                  $tag = 'v' + ($ReleaseVersion -creplace '^v', '')
+                  $directoryUri = [Uri]("https://github.com/parasoft/parasoft-report-transformer/releases/download/$tag/")
+              }
               if (-not $directoryUri.IsAbsoluteUri -or $directoryUri.Scheme -cne 'https' -or
                   -not $directoryUri.AbsolutePath.EndsWith('/') -or $directoryUri.Query -or $directoryUri.Fragment) {
                   throw 'Release directory must be an absolute HTTPS URL ending in / without a query or fragment.'
               }
               if (-not (Test-Path -LiteralPath $Workspace -PathType Container)) { throw "Workspace not found: $Workspace" }
               $headers = @{ 'Cache-Control' = 'no-cache'; Pragma = 'no-cache' }
-              # HTTP does not expand *.zip: discover only direct ZIP links within latest_build/.
-              $index = Invoke-WebRequest -UseBasicParsing -Uri $directoryUri.AbsoluteUri -Headers $headers -TimeoutSec 60
-              Get-ReleaseResponseUri $directoryUri $index | Out-Null
-              $links = @(Get-ReleaseZipLinks $directoryUri ([string]$index.Content))
-              if ($links.Count -eq 0) { throw "No parasoft-report-transformer-*.zip found in $DirectoryUrl" }
-              $packages = @(foreach ($link in $links) {
-                  $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri $link.Url -Headers $headers -TimeoutSec 60
-                  Get-ReleaseResponseUri $directoryUri $response | Out-Null
-                  $length = $null
-                  if ($response.Headers['Content-Length']) { $length = [long]::Parse([string]$response.Headers['Content-Length']) }
-                  [pscustomobject]@{
-                      Name = $link.Name; Url = $link.Url; Length = $length
-                      LastModified = Get-ReleaseLastModified $response.Headers
-                      ETag = [string]$response.Headers['ETag']
+              if ($githubRelease) {
+                  $package = Get-GitHubReleasePackage $tag
+              } else {
+                  # HTTP does not expand *.zip: discover only direct ZIP links within latest_build/.
+                  $index = Invoke-WebRequest -UseBasicParsing -Uri $directoryUri.AbsoluteUri -Headers $headers -TimeoutSec 60
+                  Get-ReleaseResponseUri $directoryUri $index | Out-Null
+                  $links = @(Get-ReleaseZipLinks $directoryUri ([string]$index.Content))
+                  if ($links.Count -eq 0) { throw "No parasoft-report-transformer-*.zip found in $DirectoryUrl" }
+                  $packages = @(foreach ($link in $links) {
+                      $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri $link.Url -Headers $headers -TimeoutSec 60
+                      Get-ReleaseResponseUri $directoryUri $response | Out-Null
+                      $length = $null
+                      if ($response.Headers['Content-Length']) { $length = [long]::Parse([string]$response.Headers['Content-Length']) }
+                      [pscustomobject]@{
+                          Name = $link.Name; Url = $link.Url; Length = $length
+                          LastModified = Get-ReleaseLastModified $response.Headers
+                          ETag = [string]$response.Headers['ETag']
+                      }
+                  })
+                  if ($packages.Count -gt 1) {
+                      if (@($packages | Where-Object { $null -eq $_.LastModified }).Count -gt 0) {
+                          throw 'Multiple release ZIPs found without complete Last-Modified headers; cannot identify the latest package.'
+                      }
+                      $packages = @($packages | Sort-Object LastModified -Descending)
+                      if ($packages[0].LastModified -eq $packages[1].LastModified) {
+                          throw 'Multiple release ZIPs share the latest Last-Modified timestamp; refusing an ambiguous package.'
+                      }
                   }
-              })
-              if ($packages.Count -gt 1) {
-                  if (@($packages | Where-Object { $null -eq $_.LastModified }).Count -gt 0) {
-                      throw 'Multiple release ZIPs found without complete Last-Modified headers; cannot identify the latest package.'
-                  }
-                  $packages = @($packages | Sort-Object LastModified -Descending)
-                  if ($packages[0].LastModified -eq $packages[1].LastModified) {
-                      throw 'Multiple release ZIPs share the latest Last-Modified timestamp; refusing an ambiguous package.'
-                  }
+                  $package = $packages[0]
               }
-              $package = $packages[0]
               # Unique, short workspace paths prevent reuse of an old package or extracted converter.
               $scratch = Join-Path $Workspace ('rt-release-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
               New-Item -ItemType Directory -Path $scratch | Out-Null
@@ -144,10 +269,10 @@ jobs:
               Write-Host "Downloading release package: $($package.Url)"
               $download = Invoke-WebRequest -UseBasicParsing -Uri $package.Url -Headers $downloadHeaders `
                   -OutFile $zip -PassThru -TimeoutSec 600
-              $resolvedUri = Get-ReleaseResponseUri $directoryUri $download
+              $resolvedUri = Get-ReleaseResponseUri $directoryUri $download -GitHubAsset:$githubRelease
               $length = (Get-Item -LiteralPath $zip).Length
               if ($length -le 0 -or ($null -ne $package.Length -and $length -ne $package.Length)) {
-                  throw 'Release ZIP is empty or its length differs from HEAD; download incomplete or latest_build changed.'
+                  throw 'Release ZIP is empty or its length differs from the selected package; download incomplete or package changed.'
               }
               $modified = Get-ReleaseLastModified $download.Headers
               if (($package.LastModified -and $modified -and $package.LastModified -ne $modified) -or
@@ -155,6 +280,9 @@ jobs:
                   throw 'Release package changed between HEAD and download. Retry with a stable latest_build.'
               }
               $sha256 = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+              if ($githubRelease -and $package.ExpectedSha256 -and $sha256 -ine $package.ExpectedSha256) {
+                  throw 'Release ZIP SHA-256 differs from the GitHub asset digest.'
+              }
               $extracted = Join-Path $scratch 'extracted'
               # Validate all archive paths before extracting any files on the self-hosted runner.
               Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -175,9 +303,47 @@ jobs:
                   $_.Directory.Name -ieq 'bin'
               })
               if ($converters.Count -ne 1) { throw "Expected exactly one bin/XMLToSARIF.bat in release ZIP; found $($converters.Count)." }
+              $propertiesUri = $null
+              $build = [pscustomobject]@{ buildName = $null; buildId = $null; buildDate = $null; buildDateSource = $null; publisherTimestamp = $null }
+              if ($githubRelease) {
+                  $current = Get-GitHubReleasePackage $tag
+                  if ($current.AssetId -ne $package.AssetId -or $current.Length -ne $package.Length -or
+                      $current.AssetUpdatedAt -cne $package.AssetUpdatedAt -or $current.ExpectedSha256 -cne $package.ExpectedSha256) {
+                      throw 'GitHub release asset changed during validation. Retry.'
+                  }
+              } else {
+                  $propertiesUri = [Uri]::new($directoryUri, 'build.properties')
+                  $properties = ''
+                  try {
+                      $buildResponse = Invoke-WebRequest -UseBasicParsing -Uri $propertiesUri.AbsoluteUri -Headers $headers -TimeoutSec 60
+                      Get-ReleaseResponseUri $directoryUri $buildResponse | Out-Null
+                      $properties = $buildResponse.Content
+                  } catch { Write-Warning 'Could not read publisher build.properties; using ZIP directory metadata when available.' }
+                  $build = Get-ReleaseBuildInfo $directoryUri ([string]$index.Content) $package.Name $properties
+                  # Bind the publisher metadata to the ZIP just downloaded: fail rather than print a newer build's date.
+                  $latest = Invoke-WebRequest -UseBasicParsing -Method Head -Uri $package.Url -Headers $headers -TimeoutSec 60
+                  Get-ReleaseResponseUri $directoryUri $latest | Out-Null
+                  $latestModified = Get-ReleaseLastModified $latest.Headers
+                  if (($latest.Headers['Content-Length'] -and [long]$latest.Headers['Content-Length'] -ne $length) -or
+                      ($package.LastModified -and $latestModified -and $package.LastModified -ne $latestModified) -or
+                      ($package.ETag -and $latest.Headers['ETag'] -and $package.ETag -cne [string]$latest.Headers['ETag'])) {
+                      throw 'latest_build changed after ZIP download or while reading its build date. Retry.'
+                  }
+              }
               $metadata = [ordered]@{
+                  source = if ($githubRelease) { 'github-release' } else { 'latest-build' }
+                  releaseTag = if ($githubRelease) { $package.Tag } else { $null }
+                  releaseUrl = if ($githubRelease) { $package.ReleaseUrl } else { $null }
+                  publishedAtUtc = if ($githubRelease) { $package.PublishedAt } else { $null }
+                  assetId = if ($githubRelease) { $package.AssetId } else { $null }
+                  assetUpdatedAtUtc = if ($githubRelease) { $package.AssetUpdatedAt } else { $null }
+                  expectedSha256 = if ($githubRelease) { $package.ExpectedSha256 } else { $null }
                   name = $package.Name; url = $package.Url; resolvedUrl = $resolvedUri.AbsoluteUri
                   sha256 = $sha256; length = $length
+                  buildName = $build.buildName; buildId = $build.buildId
+                  buildDate = $build.buildDate; buildDateSource = $build.buildDateSource
+                  publisherTimestamp = $build.publisherTimestamp
+                  buildPropertiesUrl = if ($propertiesUri) { $propertiesUri.AbsoluteUri } else { $null }
                   lastModifiedUtc = if ($modified) { $modified.ToString('o') } else { $null }
                   downloadedAtUtc = [DateTime]::UtcNow.ToString('o')
               }
@@ -185,11 +351,14 @@ jobs:
               New-Item -ItemType Directory -Path $reports -Force | Out-Null
               $metadataPath = Join-Path $reports 'release-package.json'
               [IO.File]::WriteAllText($metadataPath, ($metadata | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+              Write-Host "Release ZIP: $($package.Name)"
+              Write-Host "Release ZIP URL: $($package.Url)"
+              Write-ReleasePackageDates $metadata
               Write-Host "Release ZIP SHA-256: $sha256"
               Write-Host "Released converter: $($converters[0].FullName)"
               return [pscustomobject]@{ ConverterPath = $converters[0].FullName; MetadataPath = $metadataPath; Package = $metadata }
           }
-          $release = Get-ReleaseTransformer -Workspace $env:GITHUB_WORKSPACE
+          $release = Get-ReleaseTransformer -Workspace $env:GITHUB_WORKSPACE -ReleaseVersion $env:RELEASE_VERSION
           $outputs = @(
             "converter_path=$($release.ConverterPath)",
             "package_name=$($release.Package.name)",
@@ -257,4 +426,4 @@ jobs:
           path: reports/*.*
           if-no-files-found: warn
 
-# Fork validation run: 2026-11-25T02:08:00.2159600Z 55f95bd0655741a7b64c838a7ef82ca6
+# Fork validation run: 2026-11-26T08:45:59.7042469Z 194c9a4214da43cc9dafef2f6bb73fc0
